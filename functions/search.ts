@@ -50,7 +50,7 @@ export const onRequestPost = async (ctx: any) => {
 		typeof body.description === "string"
 			? toSet(body.description.split(/\s+/))
 			: new Set<string>();
-	const keywordMode = body.keywordMode === "OR" ? "OR" : "AND"; // Default to AND
+	const keywordMode = body.keywordMode === "AND" ? "AND" : "OR"; // Default to OR
 	const limit = Math.max(1, Math.min(200, Number(body.limit ?? 24)));
 
 	const scoredResults: SearchResult[] = [];
@@ -86,7 +86,7 @@ export const onRequestPost = async (ctx: any) => {
 				industryMatch = true; // No industry filter means pass
 			}
 
-			// Keywords matching (flexible AND/OR)
+			// Keywords matching (flexible AND/OR with partial matching)
 			let keywordMatch = false;
 			if (kwSet.size > 0) {
 				const docKeywords = (d.keywords ?? []).join(" ").toLowerCase();
@@ -98,9 +98,20 @@ export const onRequestPost = async (ctx: any) => {
 
 				let matchedKeywords = 0;
 				for (const keyword of kwSet) {
+					// Check for exact match first (higher score)
 					if (allDocText.includes(keyword)) {
 						matchedKeywords++;
 						score += 30;
+					} else {
+						// Check for partial matches (lower score)
+						const words = allDocText.split(/\s+/);
+						for (const word of words) {
+							if (word.includes(keyword) || keyword.includes(word)) {
+								matchedKeywords++;
+								score += 15; // Lower score for partial matches
+								break;
+							}
+						}
 					}
 				}
 
@@ -112,7 +123,7 @@ export const onRequestPost = async (ctx: any) => {
 
 				// Bonus for multiple matches
 				if (matchedKeywords > 1) {
-					score += matchedKeywords * 10;
+					score += matchedKeywords * 5; // Reduced bonus to balance scoring
 				}
 			} else {
 				keywordMatch = true; // No keywords filter means pass
@@ -149,7 +160,14 @@ export const onRequestPost = async (ctx: any) => {
 				descriptionMatch = true; // No description filter means pass
 			}
 
-			shouldInclude = industryMatch && keywordMatch && descriptionMatch;
+			// More lenient matching: if industry is specified, it must match
+			// But keywords and description are more flexible
+			if (industry) {
+				shouldInclude = industryMatch && (keywordMatch || descriptionMatch);
+			} else {
+				// If no industry filter, just need keywords or description to match
+				shouldInclude = keywordMatch || descriptionMatch;
+			}
 		}
 
 		if (shouldInclude) {
