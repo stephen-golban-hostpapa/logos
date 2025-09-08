@@ -1,8 +1,6 @@
 // /functions/search.ts
-// Works with docs like:
-// { id: "966294985", category: "Finance & Insurance", categories: ["Finance & Insurance"], keywords: [...], labels: [...], svg: "966294985.svg" }
-
-import Fuse from "fuse.js";
+// POST body: { industries?: string[], keywords?: string[], company?: string, limit?: number }
+// Exact, case-insensitive matches. Industry: ANY; Keywords: AND.
 
 type Doc = {
 	id: string;
@@ -10,104 +8,90 @@ type Doc = {
 	categories?: string[];
 	keywords?: string[];
 	labels?: string[];
-	svg?: string; // relative filename like "966294985.svg"
+	svg?: string; // e.g. "966294985.svg"
 };
 
 let docs: Doc[] | null = null;
 
+const cors = {
+	"Access-Control-Allow-Origin": "*",
+	"Access-Control-Allow-Methods": "POST, OPTIONS",
+	"Access-Control-Allow-Headers": "Content-Type",
+};
+
 async function loadIndex(baseUrl: string) {
 	if (!docs) {
 		const url = new URL("/logos/index.json", baseUrl).toString();
+		// Keep index hot at the edge (doesn't cache the response we return)
 		const res = await fetch(url, { cf: { cacheTtl: 3600 } });
 		docs = (await res.json()) as Doc[];
 	}
+	return docs!;
 }
 
-function absoluteSvg(baseUrl: string, svg?: string) {
-	if (!svg) return null;
-	// ensure absolute URL for the client:
-	return new URL(`/logos/${svg}`, baseUrl).toString();
-}
+const norm = (s: string) => s.trim().toLowerCase();
+const toSet = (arr?: string[]) =>
+	new Set((arr ?? []).map(norm).filter(Boolean));
 
-function buildFuse(collection: Doc[]) {
-	return new Fuse(collection, {
-		threshold: 0.35, // stricter than default for better precision
-		ignoreLocation: true,
-		keys: [
-			{ name: "keywords", weight: 0.6 },
-			{ name: "category", weight: 0.25 },
-			{ name: "categories", weight: 0.15 },
-		],
-	});
-}
+export const onRequestOptions: PagesFunction = async () =>
+	new Response(null, { headers: cors });
 
-// Support both POST (structured body) and GET (?q=, &category=)
-export const onRequest: PagesFunction = async (ctx) => {
+export const onRequestPost: PagesFunction = async (ctx) => {
 	await loadIndex(ctx.request.url);
+	const origin = new URL(ctx.request.url).origin;
 
-	const url = new URL(ctx.request.url);
-	const isPost = ctx.request.method === "POST";
-	let category = "";
-	let company = "";
-	let slogan = "";
-	let description = "";
-	let q = "";
-	let limit = 24;
+	const body = await ctx.request.json().catch(() => ({}));
+	const industriesSet = toSet(body.industries);
+	const keywordsSet = toSet(body.keywords);
+	const limit = Math.max(1, Math.min(200, Number(body.limit ?? 24))); // cap it
 
-	if (isPost) {
-		const body = await ctx.request.json().catch(() => ({}));
-		category = (body.category || "").trim();
-		company = (body.company || "").trim();
-		slogan = (body.slogan || "").trim();
-		description = (body.description || "").trim();
-		limit = Number(body.limit || 24);
-	} else {
-		// GET fallback
-		category = (url.searchParams.get("category") || "").trim();
-		q = (url.searchParams.get("q") || "").trim();
-		limit = Number(url.searchParams.get("limit") || 24);
+	// Filter: industries = ANY (or no filter if none provided)
+	//         keywords  = AND (every provided keyword must be present exactly)
+	const results: Doc[] = [];
+	for (const d of docs!) {
+		// industries check (ANY)
+		if (industriesSet.size) {
+			const docIndustries = new Set<string>();
+			if (d.category) docIndustries.add(norm(d.category));
+			for (const c of d.categories ?? []) docIndustries.add(norm(c));
+			let hit = false;
+			for (const i of industriesSet) {
+				if (docIndustries.has(i)) {
+					hit = true;
+					break;
+				}
+			}
+			if (!hit) continue;
+		}
+
+		// keywords check (AND)
+		if (keywordsSet.size) {
+			const docKeywords = new Set((d.keywords ?? []).map(norm));
+			let all = true;
+			for (const k of keywordsSet) {
+				if (!docKeywords.has(k)) {
+					all = false;
+					break;
+				}
+			}
+			if (!all) continue;
+		}
+
+		results.push(d);
+		if (results.length >= limit) break;
 	}
 
-	// 1) Start with candidates filtered by category (strict filter if provided)
-	let candidates = docs!;
-	if (category) {
-		const cat = category.toLowerCase();
-		candidates = candidates.filter(
-			(d) =>
-				(d.category && d.category.toLowerCase() === cat) ||
-				(Array.isArray(d.categories) &&
-					d.categories.some((c) => c.toLowerCase() === cat)),
-		);
-	}
-
-	// 2) Build the search string (company+slogan+description for POST; or q for GET)
-	const text = isPost
-		? [company, slogan, description].filter(Boolean).join(" ")
-		: q;
-
-	// 3) Fuzzy search (or simple slice when no text provided)
-	let results: Doc[];
-	if (text) {
-		const fuse = buildFuse(candidates);
-		results = fuse.search(text, { limit }).map((r) => r.item);
-	} else {
-		results = candidates.slice(0, limit);
-	}
-
-	// 4) Normalize SVG to absolute URLs
-	const normalized = results.map((d) => ({
+	// Absolute SVG URLs
+	const payload = results.map((d) => ({
 		...d,
-		svg: absoluteSvg(url.origin, d.svg!),
+		svg: d.svg ? new URL(`/logos/${d.svg}`, origin).toString() : null,
 	}));
 
-	return new Response(JSON.stringify({ results: normalized }), {
+	return new Response(JSON.stringify({ results: payload }), {
 		headers: {
 			"Content-Type": "application/json",
-			// CORS – since you’re calling this from a Next.js app on another origin
-			"Access-Control-Allow-Origin": "*",
-			"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-			"Access-Control-Allow-Headers": "Content-Type",
 			"Cache-Control": "no-store",
+			...cors,
 		},
 	});
 };
