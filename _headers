@@ -1,0 +1,7 @@
+/index.json
+  Cache-Control: public, max-age=3600
+  Access-Control-Allow-Origin: *
+
+/*.svg
+  Cache-Control: public, max-age=31536000, immutable
+  Access-Control-Allow-Origin: *
