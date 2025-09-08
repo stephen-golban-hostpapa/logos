@@ -1,6 +1,5 @@
-// /functions/logo.ts
-// GET /logo/:id - Get a specific logo by ID
-// POST body: { id: string } - Alternative way to get logo by ID
+// /functions/logo/[id].ts
+// GET /logo/:id - Get a specific logo by ID using Cloudflare Pages dynamic routing
 
 type Doc = {
 	id: string;
@@ -15,7 +14,7 @@ let docs: Doc[] | null = null;
 
 const CORS = {
 	"Access-Control-Allow-Origin": "*",
-	"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+	"Access-Control-Allow-Methods": "GET, OPTIONS",
 	"Access-Control-Allow-Headers": "Content-Type",
 };
 
@@ -47,14 +46,23 @@ export const onRequestGet = async (ctx: any) => {
 	await loadIndex(ctx.request.url);
 	const origin = new URL(ctx.request.url).origin;
 	
-	// Extract ID from URL path
-	const url = new URL(ctx.request.url);
-	const pathParts = url.pathname.split('/');
-	const id = pathParts[pathParts.length - 1]; // Get the last part of the path
+	// Extract ID from Cloudflare Pages params
+	const id = ctx.params?.id || "";
+	
+	// Debug logging
+	console.log('Params:', ctx.params);
+	console.log('Extracted ID:', id);
+	console.log('Docs loaded:', docs ? docs.length : 'null');
 	
 	if (!id) {
 		return new Response(
-			JSON.stringify({ error: "Logo ID is required" }), 
+			JSON.stringify({ 
+				error: "Logo ID is required",
+				debug: {
+					params: ctx.params,
+					extractedId: id
+				}
+			}), 
 			{
 				status: 400,
 				headers: {
@@ -69,52 +77,14 @@ export const onRequestGet = async (ctx: any) => {
 	
 	if (!logo) {
 		return new Response(
-			JSON.stringify({ error: "Logo not found" }), 
-			{
-				status: 404,
-				headers: {
-					"Content-Type": "application/json",
-					...CORS,
-				},
-			}
-		);
-	}
-
-	return new Response(JSON.stringify({ logo }), {
-		headers: {
-			"Content-Type": "application/json",
-			"Cache-Control": "public, max-age=3600", // Cache for 1 hour
-			...CORS,
-		},
-	});
-};
-
-// POST /logo (alternative way to get by ID)
-export const onRequestPost = async (ctx: any) => {
-	await loadIndex(ctx.request.url);
-	const origin = new URL(ctx.request.url).origin;
-
-	const body = await ctx.request.json().catch(() => ({}));
-	const id = typeof body.id === "string" ? body.id.trim() : "";
-	
-	if (!id) {
-		return new Response(
-			JSON.stringify({ error: "Logo ID is required" }), 
-			{
-				status: 400,
-				headers: {
-					"Content-Type": "application/json",
-					...CORS,
-				},
-			}
-		);
-	}
-
-	const logo = findLogoById(id, origin);
-	
-	if (!logo) {
-		return new Response(
-			JSON.stringify({ error: "Logo not found" }), 
+			JSON.stringify({ 
+				error: "Logo not found",
+				debug: {
+					searchedId: id,
+					totalLogos: docs?.length || 0,
+					sampleIds: docs?.slice(0, 5).map(d => d.id) || []
+				}
+			}), 
 			{
 				status: 404,
 				headers: {
