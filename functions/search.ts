@@ -1,5 +1,5 @@
 // /functions/search.ts
-// POST body: { industry?: string, keywords?: string[], company?: string, limit?: number }
+// POST body: { industry?: string, keywords?: string[], description?: string, company?: string, limit?: number, keywordMode?: 'AND' | 'OR' }
 
 type Doc = {
 	id: string;
@@ -8,6 +8,10 @@ type Doc = {
 	keywords?: string[];
 	labels?: string[];
 	svg?: string; // e.g. "966294985.svg"
+};
+
+type SearchResult = Doc & {
+	score: number;
 };
 
 let docs: Doc[] | null = null;
@@ -26,54 +30,144 @@ async function loadIndex(baseUrl: string) {
 	if (!docs) {
 		const url = new URL("/logos/index.json", baseUrl).toString();
 		// keep index hot at the edge (applies to GET/HEAD)
-		const r = await fetch(url, { cf: { cacheTtl: 3600 } });
+		const r = await fetch(url, { cf: { cacheTtl: 3600 } } as any);
 		docs = (await r.json()) as Doc[];
 	}
-	return docs!;
+	return docs || [];
 }
 
-export const onRequestOptions: PagesFunction = async () =>
+export const onRequestOptions = async () =>
 	new Response(null, { status: 204, headers: CORS }); // CORS preflight OK
 
-export const onRequestPost: PagesFunction = async (ctx) => {
+export const onRequestPost = async (ctx: any) => {
 	await loadIndex(ctx.request.url);
 	const origin = new URL(ctx.request.url).origin;
 
 	const body = await ctx.request.json().catch(() => ({}));
 	const industry = typeof body.industry === "string" ? norm(body.industry) : "";
-	const kwSet = toSet(body.keywords); // AND, exact (case-insensitive)
+	const kwSet = toSet(body.keywords);
+	const descSet =
+		typeof body.description === "string"
+			? toSet(body.description.split(/\s+/))
+			: new Set<string>();
+	const keywordMode = body.keywordMode === "OR" ? "OR" : "AND"; // Default to AND
 	const limit = Math.max(1, Math.min(200, Number(body.limit ?? 24)));
 
-	const out: Doc[] = [];
-	for (const d of docs!) {
-		// INDUSTRY = ANY (single string provided -> must match category or categories[])
-		if (industry) {
-			const bag = new Set<string>();
-			if (d.category) bag.add(norm(d.category));
-			for (const c of d.categories ?? []) bag.add(norm(c));
-			if (!bag.has(industry)) continue;
-		}
+	const scoredResults: SearchResult[] = [];
 
-		// KEYWORDS = AND (every provided keyword must be present exactly)
-		if (kwSet.size) {
-			const dkw = new Set((d.keywords ?? []).map(norm));
-			let all = true;
-			for (const k of kwSet)
-				if (!dkw.has(k)) {
-					all = false;
-					break;
+	for (const d of docs || []) {
+		let shouldInclude = false;
+		let score = 0;
+
+		// If no search criteria provided, include all with base score
+		if (!industry && kwSet.size === 0 && descSet.size === 0) {
+			shouldInclude = true;
+			score = 1;
+		} else {
+			// Industry matching (more flexible now)
+			let industryMatch = false;
+			if (industry) {
+				const allCategories = [d.category, ...(d.categories ?? [])].filter(
+					(cat): cat is string => Boolean(cat),
+				);
+				for (const cat of allCategories) {
+					const normalizedCat = norm(cat);
+					if (
+						normalizedCat === industry ||
+						normalizedCat.includes(industry) ||
+						industry.includes(normalizedCat)
+					) {
+						industryMatch = true;
+						score += normalizedCat === industry ? 100 : 50; // Exact vs partial match
+						break;
+					}
 				}
-			if (!all) continue;
+			} else {
+				industryMatch = true; // No industry filter means pass
+			}
+
+			// Keywords matching (flexible AND/OR)
+			let keywordMatch = false;
+			if (kwSet.size > 0) {
+				const docKeywords = (d.keywords ?? []).join(" ").toLowerCase();
+				const docCategories = [d.category, ...(d.categories ?? [])]
+					.filter((cat): cat is string => Boolean(cat))
+					.join(" ")
+					.toLowerCase();
+				const allDocText = `${docKeywords} ${docCategories}`;
+
+				let matchedKeywords = 0;
+				for (const keyword of kwSet) {
+					if (allDocText.includes(keyword)) {
+						matchedKeywords++;
+						score += 30;
+					}
+				}
+
+				if (keywordMode === "AND") {
+					keywordMatch = matchedKeywords === kwSet.size;
+				} else {
+					keywordMatch = matchedKeywords > 0;
+				}
+
+				// Bonus for multiple matches
+				if (matchedKeywords > 1) {
+					score += matchedKeywords * 10;
+				}
+			} else {
+				keywordMatch = true; // No keywords filter means pass
+			}
+
+			// Description matching (searches across all fields)
+			let descriptionMatch = false;
+			if (descSet.size > 0) {
+				const allText = [
+					d.category,
+					...(d.categories ?? []),
+					...(d.keywords ?? []),
+					...(d.labels ?? []),
+				]
+					.filter((item): item is string => Boolean(item))
+					.join(" ")
+					.toLowerCase();
+
+				let matchedTerms = 0;
+				for (const term of descSet) {
+					if (allText.includes(term)) {
+						matchedTerms++;
+						score += 20;
+					}
+				}
+
+				descriptionMatch = matchedTerms > 0;
+
+				// Bonus for multiple description matches
+				if (matchedTerms > 1) {
+					score += matchedTerms * 5;
+				}
+			} else {
+				descriptionMatch = true; // No description filter means pass
+			}
+
+			shouldInclude = industryMatch && keywordMatch && descriptionMatch;
 		}
 
-		out.push(d);
-		if (out.length >= limit) break;
+		if (shouldInclude) {
+			scoredResults.push({ ...d, score });
+		}
 	}
 
-	// upgrade svg -> absolute URL for direct <img src=...>
-	const results = out.map((d) => ({
-		...d,
-		svg: d.svg ? new URL(`/logos/${d.svg}`, origin).toString() : null,
+	// Sort by score (highest first), then by id for consistency
+	scoredResults.sort((a, b) => {
+		if (b.score !== a.score) return b.score - a.score;
+		return a.id.localeCompare(b.id);
+	});
+
+	// Take top results and remove score from output
+	const topResults = scoredResults.slice(0, limit);
+	const results = topResults.map(({ score, ...doc }) => ({
+		...doc,
+		svg: doc.svg ? new URL(`/logos/${doc.svg}`, origin).toString() : null,
 	}));
 
 	return new Response(JSON.stringify({ results }), {
