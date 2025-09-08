@@ -1,5 +1,5 @@
 // /functions/search.ts
-// POST body: { industries?: string[], keywords?: string[], company?: string, limit?: number }
+// POST body: { industry?: string, keywords?: string[], company?: string, limit?: number }
 // Exact, case-insensitive matches. Industry: ANY; Keywords: AND.
 
 type Doc = {
@@ -23,32 +23,37 @@ async function loadIndex(baseUrl: string) {
 	if (!docs) {
 		const url = new URL("/logos/index.json", baseUrl).toString();
 		// Keep index hot at the edge (doesn't cache the response we return)
+		// @ts-expect-error Cloudflare Workers runtime option
 		const res = await fetch(url, { cf: { cacheTtl: 3600 } });
 		docs = (await res.json()) as Doc[];
 	}
-	return docs!;
+	return docs as Doc[];
 }
 
 const norm = (s: string) => s.trim().toLowerCase();
 const toSet = (arr?: string[]) =>
 	new Set((arr ?? []).map(norm).filter(Boolean));
 
-export const onRequestOptions: PagesFunction = async () =>
+export const onRequestOptions = async () =>
 	new Response(null, { headers: cors });
 
-export const onRequestPost: PagesFunction = async (ctx) => {
-	await loadIndex(ctx.request.url);
+export const onRequestPost = async (ctx) => {
+	const allDocs = await loadIndex(ctx.request.url);
 	const origin = new URL(ctx.request.url).origin;
 
 	const body = await ctx.request.json().catch(() => ({}));
-	const industriesSet = toSet(body.industries);
+	// Single `industry` string only
+	const industriesSet =
+		typeof body.industry === "string"
+			? toSet([body.industry])
+			: new Set<string>();
 	const keywordsSet = toSet(body.keywords);
 	const limit = Math.max(1, Math.min(200, Number(body.limit ?? 24))); // cap it
 
 	// Filter: industries = ANY (or no filter if none provided)
 	//         keywords  = AND (every provided keyword must be present exactly)
 	const results: Doc[] = [];
-	for (const d of docs!) {
+	for (const d of allDocs) {
 		// industries check (ANY)
 		if (industriesSet.size) {
 			const docIndustries = new Set<string>();
