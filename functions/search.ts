@@ -55,119 +55,124 @@ export const onRequestPost = async (ctx: any) => {
 
 	const scoredResults: SearchResult[] = [];
 
+	// If no industry or keywords provided, return empty results
+	if (!industry && kwSet.size === 0) {
+		return new Response(JSON.stringify({ results: [] }), {
+			headers: {
+				"Content-Type": "application/json",
+				"Cache-Control": "no-store",
+				...CORS,
+			},
+		});
+	}
+
 	for (const d of docs || []) {
 		let shouldInclude = false;
 		let score = 0;
 
-		// If no search criteria provided, include all with base score
-		if (!industry && kwSet.size === 0 && descSet.size === 0) {
-			shouldInclude = true;
-			score = 1;
-		} else {
-			// Industry matching (more flexible now)
-			let industryMatch = false;
-			if (industry) {
-				const allCategories = [d.category, ...(d.categories ?? [])].filter(
-					(cat): cat is string => Boolean(cat),
-				);
-				for (const cat of allCategories) {
-					const normalizedCat = norm(cat);
-					if (
-						normalizedCat === industry ||
-						normalizedCat.includes(industry) ||
-						industry.includes(normalizedCat)
-					) {
-						industryMatch = true;
-						score += normalizedCat === industry ? 100 : 50; // Exact vs partial match
-						break;
-					}
+		// Industry matching (more flexible now)
+		let industryMatch = false;
+		if (industry) {
+			const allCategories = [d.category, ...(d.categories ?? [])].filter(
+				(cat): cat is string => Boolean(cat),
+			);
+			for (const cat of allCategories) {
+				const normalizedCat = norm(cat);
+				if (
+					normalizedCat === industry ||
+					normalizedCat.includes(industry) ||
+					industry.includes(normalizedCat)
+				) {
+					industryMatch = true;
+					score += normalizedCat === industry ? 100 : 50; // Exact vs partial match
+					break;
 				}
-			} else {
-				industryMatch = true; // No industry filter means pass
 			}
+		} else {
+			industryMatch = true; // No industry filter means pass
+		}
 
-			// Keywords matching (flexible AND/OR with partial matching)
-			let keywordMatch = false;
-			if (kwSet.size > 0) {
-				const docKeywords = (d.keywords ?? []).join(" ").toLowerCase();
-				const docCategories = [d.category, ...(d.categories ?? [])]
-					.filter((cat): cat is string => Boolean(cat))
-					.join(" ")
-					.toLowerCase();
-				const allDocText = `${docKeywords} ${docCategories}`;
+		// Keywords matching (flexible AND/OR with partial matching)
+		let keywordMatch = false;
+		if (kwSet.size > 0) {
+			const docKeywords = (d.keywords ?? []).join(" ").toLowerCase();
+			const docCategories = [d.category, ...(d.categories ?? [])]
+				.filter((cat): cat is string => Boolean(cat))
+				.join(" ")
+				.toLowerCase();
+			const allDocText = `${docKeywords} ${docCategories}`;
 
-				let matchedKeywords = 0;
-				for (const keyword of kwSet) {
-					// Check for exact match first (higher score)
-					if (allDocText.includes(keyword)) {
-						matchedKeywords++;
-						score += 30;
-					} else {
-						// Check for partial matches (lower score)
-						const words = allDocText.split(/\s+/);
-						for (const word of words) {
-							if (word.includes(keyword) || keyword.includes(word)) {
-								matchedKeywords++;
-								score += 15; // Lower score for partial matches
-								break;
-							}
+			let matchedKeywords = 0;
+			for (const keyword of kwSet) {
+				// Check for exact match first (higher score)
+				if (allDocText.includes(keyword)) {
+					matchedKeywords++;
+					score += 30;
+				} else {
+					// Check for partial matches (lower score)
+					const words = allDocText.split(/\s+/);
+					for (const word of words) {
+						if (word.includes(keyword) || keyword.includes(word)) {
+							matchedKeywords++;
+							score += 15; // Lower score for partial matches
+							break;
 						}
 					}
 				}
-
-				if (keywordMode === "AND") {
-					keywordMatch = matchedKeywords === kwSet.size;
-				} else {
-					keywordMatch = matchedKeywords > 0;
-				}
-
-				// Bonus for multiple matches
-				if (matchedKeywords > 1) {
-					score += matchedKeywords * 5; // Reduced bonus to balance scoring
-				}
-			} else {
-				keywordMatch = true; // No keywords filter means pass
 			}
 
-			// Description matching (searches across all fields)
-			let descriptionMatch = false;
-			if (descSet.size > 0) {
-				const allText = [
-					d.category,
-					...(d.categories ?? []),
-					...(d.keywords ?? []),
-					...(d.labels ?? []),
-				]
-					.filter((item): item is string => Boolean(item))
-					.join(" ")
-					.toLowerCase();
-
-				let matchedTerms = 0;
-				for (const term of descSet) {
-					if (allText.includes(term)) {
-						matchedTerms++;
-						score += 20;
-					}
-				}
-
-				descriptionMatch = matchedTerms > 0;
-
-				// Bonus for multiple description matches
-				if (matchedTerms > 1) {
-					score += matchedTerms * 5;
-				}
+			if (keywordMode === "AND") {
+				keywordMatch = matchedKeywords === kwSet.size;
 			} else {
-				descriptionMatch = true; // No description filter means pass
+				keywordMatch = matchedKeywords > 0;
 			}
 
-			// More lenient matching: if industry is specified, it must match
-			// But keywords and description are more flexible
-			if (industry) {
-				shouldInclude = industryMatch && (keywordMatch || descriptionMatch);
-			} else {
-				// If no industry filter, just need keywords or description to match
-				shouldInclude = keywordMatch || descriptionMatch;
+			// Bonus for multiple matches
+			if (matchedKeywords > 1) {
+				score += matchedKeywords * 5; // Reduced bonus to balance scoring
 			}
+		} else {
+			keywordMatch = true; // No keywords filter means pass
+		}
+
+		// Description matching (searches across all fields)
+		let descriptionMatch = false;
+		if (descSet.size > 0) {
+			const allText = [
+				d.category,
+				...(d.categories ?? []),
+				...(d.keywords ?? []),
+				...(d.labels ?? []),
+			]
+				.filter((item): item is string => Boolean(item))
+				.join(" ")
+				.toLowerCase();
+
+			let matchedTerms = 0;
+			for (const term of descSet) {
+				if (allText.includes(term)) {
+					matchedTerms++;
+					score += 20;
+				}
+			}
+
+			descriptionMatch = matchedTerms > 0;
+
+			// Bonus for multiple description matches
+			if (matchedTerms > 1) {
+				score += matchedTerms * 5;
+			}
+		} else {
+			descriptionMatch = true; // No description filter means pass
+		}
+
+		// More lenient matching: if industry is specified, it must match
+		// But keywords and description are more flexible
+		if (industry) {
+			shouldInclude = industryMatch && (keywordMatch || descriptionMatch);
+		} else {
+			// If no industry filter, just need keywords or description to match
+			shouldInclude = keywordMatch || descriptionMatch;
 		}
 
 		if (shouldInclude) {
