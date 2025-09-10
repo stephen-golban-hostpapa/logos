@@ -181,11 +181,11 @@ export const onRequestPost = async (ctx: any) => {
 		return a.id.localeCompare(b.id);
 	});
 
-	// Take top results and remove score from output
+	// Take top results and return only id and url
 	const topResults = scoredResults.slice(0, limit);
 	const results = topResults.map(({ score, ...doc }) => ({
-		...doc,
-		svg: doc.svg ? new URL(`/logos/${doc.svg}`, origin).toString() : null,
+		id: doc.id,
+		url: doc.svg ? new URL(`/logos/${doc.svg}`, origin).toString() : null,
 	}));
 
 	return new Response(JSON.stringify({ results }), {
